@@ -11,9 +11,9 @@ public class BTreeTest {
   @Test
   public void testBTree() {
 
-    BTreeBuilder<Integer, String> btree = new BTreeBuilder<>(5, null);
+    BTreeBuilder<Integer, String> btree = new BTreeBuilder<>(Integer.class, String.class, 4, null);
     SortedMap<Integer, String> input = new TreeMap<>();
-    for (int i = 0; i < 10; i++) {
+    for (int i = 1; i <= 20; i++) {
       input.put(i, Integer.toString(i));
     }
 
