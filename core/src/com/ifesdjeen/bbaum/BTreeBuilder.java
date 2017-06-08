@@ -1,5 +1,6 @@
 package com.ifesdjeen.bbaum;
 
+import java.io.DataOutput;
 import java.lang.reflect.Array;
 import java.nio.ByteBuffer;
 import java.util.*;
@@ -263,5 +264,15 @@ public class BTreeBuilder<K extends Comparable, V> {
 
   public static <K, V> Pair<K, V> create(K k, V v) {
     return new Pair<>(k, v);
+  }
+
+  public class LeafSerialiser {
+    public void serialize(DataOutput out, LeafNode leaf) {
+
+    }
+
+    public int serializedSize() {
+      return 0;
+    }
   }
 }
