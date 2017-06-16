@@ -13,13 +13,13 @@ public class BTreeBuilder<K extends Comparable, V> {
 
   private final int branchingFactor;
   private final Function<K, ByteBuffer> converter;
-  private final Class<K> keyKlass;
+  private final Class<K> keyClass;
   private final Class<V> valueClass;
 
-  public BTreeBuilder(Class<K> keyKlass, Class<V> valueClass, int branchingFactor, Function<K, ByteBuffer> converter) {
+  public BTreeBuilder(Class<K> keyClass, Class<V> valueClass, int branchingFactor, Function<K, ByteBuffer> converter) {
     this.branchingFactor = branchingFactor;
     this.converter = converter;
-    this.keyKlass = keyKlass;
+    this.keyClass = keyClass;
     this.valueClass = valueClass;
   }
 
@@ -57,15 +57,12 @@ public class BTreeBuilder<K extends Comparable, V> {
 
     int count;
     int size;
-
     public Node() {
-      children = (Node<K, V>[]) Array.newInstance(Node.class, branchingFactor);
+      children = (Node[]) Array.newInstance(Node.class, branchingFactor);
 
       this.count = 0;
       this.size = branchingFactor;
     }
-
-    public abstract void split();
 
     public boolean isFull() {
       return count == size;
@@ -76,64 +73,53 @@ public class BTreeBuilder<K extends Comparable, V> {
     }
 
     public abstract K minKey();
-
+    public abstract boolean isLeaf();
     public abstract String preToString();
     public abstract String postToString();
   }
 
-  public class InteriorNode extends Node<K, V> {
+  private class InteriorNode<K, V> extends Node<K, V> {
 
     InteriorNode parent;
-    final K[] keys; // denormalize?
-    final Node[] nodes;
+    final Node<K, V>[] nodes;
 
     public InteriorNode() {
-      keys = getArray(keyKlass, branchingFactor - 1);
       nodes = getArray(Node.class, branchingFactor);
-    }
-
-    public void split() {
-      InteriorNode newNode = new InteriorNode();
-
-      int splitPoint = size - 2; // or -2? SASI has -2
-      for (int i = splitPoint, j = 0; i < count; i++, j++) {
-        newNode.nodes[j] = nodes[i];
-        nodes[i] = null;
-      }
-
-      for (int i = 1; i < newNode.count; i++) {
-        newNode.keys[i - 1] = (K) newNode.nodes[i].minKey();
-      }
-      count = splitPoint;
-
-      newNode.count = 1;
-      rightmostParent = newNode;
-      if (parent == null) {
-        root = new InteriorNode();
-        this.parent = root;
-        newNode.parent = root;
-        parent.add(this);
-      }
-      else {
-        newNode.parent = parent;
-      }
-      parent.add(newNode);
     }
 
     @Override
     public K minKey() {
       assert !isEmpty() : "Empty node has no min key";
-      return keys[0];
+      return nodes[0].minKey();
     }
 
-    public void add(Node leaf) {
-      if (count > 0)
-        // TODO seems we still do need to generify at least the node class, or?
-        keys[count - 1] = (K) leaf.minKey();
-      nodes[count++] = leaf;
+    @Override
+    public boolean isLeaf() {
+      return false;
+    }
 
+    public void add(Node<K, V> childNode) {
       if (isFull()) {
-        split();
+        InteriorNode<K, V> newNode = new InteriorNode<K, V>();
+
+        // First root node
+        if (rightmostParent.parent == null) {
+          System.out.println("first root");
+          root = new InteriorNode<K, V>();
+          root.add(rightmostParent);
+          rightmostParent.parent = root;
+        }
+        newNode.parent = root;
+        newNode.add(childNode);
+        rightmostParent.parent.add(newNode);
+        rightmostParent = newNode;
+      }
+      else {
+//        if (count > 0) {
+//          System.out.println("childNode.minKey() = " + childNode.minKey());
+//          keys[count - 1] = childNode.minKey();
+//        }
+        nodes[count++] = childNode;
       }
     }
 
@@ -142,14 +128,15 @@ public class BTreeBuilder<K extends Comparable, V> {
       StringBuilder builder = new StringBuilder("InteriorNode ");
 
       builder.append("( ");
-      for (int i = 0; i < keys.length; i++) {
-        builder.append(keys[i]).append(", "); // todo: trailing comma
+      for (int i = 1; i < nodes.length; i++) {
+        if (nodes[i] != null)
+          builder.append(nodes[i].minKey()).append(", "); // TODO: trailing comma
       }
       builder.append(") ");
 
       builder.append("[");
       for (int i = 0; i < count; i++) {
-        builder.append(nodes[i]).append(", ");
+        builder.append(nodes[i]).append(", "); // TODO: trailing comma
       }
       builder.append("]");
       return builder.toString();
@@ -157,8 +144,8 @@ public class BTreeBuilder<K extends Comparable, V> {
 
     public String preToString() {
       StringBuilder builder = new StringBuilder(parent == null ? "RootNode [" : "InteriorNode [");
-      for (int i = 0; i < keys.length; i++) {
-        builder.append(keys[i]).append(", "); // todo: trailing comma
+      for (int i = 0; i < nodes.length; i++) {
+        builder.append(nodes[i].minKey()).append(", "); // TODO: trailing comma
       }
 
       builder.append("]");
@@ -169,11 +156,11 @@ public class BTreeBuilder<K extends Comparable, V> {
       StringBuilder builder = new StringBuilder();
 
       for (int i = 0; i < count; i++) {
-        builder.append(nodes[i].preToString()).append(" ");
+        builder.append(nodes[i].preToString()).append(" "); // TODO: trailing comma
       }
 
       for (int i = 0; i < count; i++) {
-        builder.append(nodes[i].postToString()).append(" ");
+        builder.append(nodes[i].postToString()).append(" "); // TODO: trailing comma
       }
 
       return builder.toString();
@@ -184,48 +171,30 @@ public class BTreeBuilder<K extends Comparable, V> {
     return (T[]) Array.newInstance(klass, size);
   }
 
-  public class LeafNode extends Node<K, V> {
+  private class LeafNode<K, V> extends Node<K, V> {
 
     final K[] keys;
     final V[] vals;
 
     public LeafNode() {
-      keys = getArray(keyKlass, branchingFactor);
-      vals = getArray(valueClass, branchingFactor);
+      keys = (K[])getArray(keyClass, branchingFactor);
+      vals = (V[])getArray(valueClass, branchingFactor);
     }
 
-    @Override
-    public void split() {
-      LeafNode newNode = new LeafNode();
-
-      int splitPoint = size - 2; // or -2? SASI has -2
-      // todo: System#arrayCopy?
-      for (int i = splitPoint, j = 0; i < count; i++, j++) {
-        newNode.keys[j] = keys[i];
-        keys[i] = null;
-        newNode.vals[j] = vals[i];
-        vals[i] = null;
-      }
-      count = splitPoint;
-
-      newNode.count = 1;
-
-      currentLeaf = newNode;
-      rightmostParent.add(newNode);
-    }
-
-    @Override
     public K minKey() {
       assert !isEmpty() : "Empty leaf has no empty key";
       return keys[0];
     }
 
     @Override
+    public boolean isLeaf() {
+      return true;
+    }
+
     public String preToString() {
       return toString();
     }
 
-    @Override
     public String postToString() {
       return toString();
     }
@@ -237,7 +206,6 @@ public class BTreeBuilder<K extends Comparable, V> {
       count++;
     }
 
-    @Override
     public String toString() {
       StringBuilder builder = new StringBuilder("LeafNode [");
 
@@ -252,23 +220,12 @@ public class BTreeBuilder<K extends Comparable, V> {
     }
   }
 
-  public static class Pair<L, R> {
-    public final L left;
-    public final R right;
-
-    Pair(L left, R right) {
-      this.left = left;
-      this.right = right;
-    }
-  }
-
-  public static <K, V> Pair<K, V> create(K k, V v) {
-    return new Pair<>(k, v);
-  }
-
+  /**
+   * Leaves are serialized
+   */
   public class LeafSerialiser {
     public void serialize(DataOutput out, LeafNode leaf) {
-
+      // out.write();
     }
 
     public int serializedSize() {
