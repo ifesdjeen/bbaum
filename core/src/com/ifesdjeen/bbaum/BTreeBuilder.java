@@ -23,7 +23,6 @@ public class BTreeBuilder<K extends Comparable, V> {
     this.valueClass = valueClass;
   }
 
-  InteriorNode root;
   LeafNode currentLeaf;
   InteriorNode rightmostParent;
 
@@ -31,7 +30,7 @@ public class BTreeBuilder<K extends Comparable, V> {
     // Create the root node
     currentLeaf = new LeafNode();
     rightmostParent = new InteriorNode();
-    root = rightmostParent;
+//    root = rightmostParent;
 
     for (Map.Entry<K, V> kvEntry : source.entrySet()) {
       currentLeaf.add(kvEntry.getKey(), kvEntry.getValue());
@@ -55,6 +54,8 @@ public class BTreeBuilder<K extends Comparable, V> {
   public abstract class Node<K, V> {
     final Node<K, V>[] children;
 
+    private InteriorNode<K, V> parent;
+
     int count;
     int size;
     public Node() {
@@ -74,13 +75,27 @@ public class BTreeBuilder<K extends Comparable, V> {
 
     public abstract K minKey();
     public abstract boolean isLeaf();
-    public abstract String preToString();
-    public abstract String postToString();
+
+    public InteriorNode<K, V> parent() {
+      return parent;
+    }
+
+    public InteriorNode root() {
+      if (parent == null)
+        return (InteriorNode) this; // TODO: move down
+      else
+        return parent.root();
+    }
+
+    public void setParent(InteriorNode parent) {
+      this.parent = parent;
+    }
+
+    public abstract String toStringRecursive();
   }
 
-  private class InteriorNode<K, V> extends Node<K, V> {
+  public class InteriorNode<K, V> extends Node<K, V> {
 
-    InteriorNode parent;
     final Node<K, V>[] nodes;
 
     public InteriorNode() {
@@ -100,69 +115,94 @@ public class BTreeBuilder<K extends Comparable, V> {
 
     public void add(Node<K, V> childNode) {
       if (isFull()) {
-        InteriorNode<K, V> newNode = new InteriorNode<K, V>();
+        // If the current chold node is full, create a new sibling
+        InteriorNode<K, V> newSibling = new InteriorNode<K, V>();
 
         // First root node
-        if (rightmostParent.parent == null) {
-          System.out.println("first root");
-          root = new InteriorNode<K, V>();
-          root.add(rightmostParent);
-          rightmostParent.parent = root;
+        if (parent() == null) { // TODO: handle useless root
+          setParent(new InteriorNode<K, V>());
+          parent().add(this);
         }
-        newNode.parent = root;
-        newNode.add(childNode);
-        rightmostParent.parent.add(newNode);
-        rightmostParent = newNode;
+
+        // and migrate the last written child node to this new sibling
+        newSibling.add(nodes[count - 1]);
+        newSibling.add(childNode);
+        nodes[count - 1] = null;
+        count--;
+        parent().add(newSibling);
+        if (childNode.isLeaf())
+          rightmostParent = newSibling; // todo: make it stateless
       }
       else {
-//        if (count > 0) {
-//          System.out.println("childNode.minKey() = " + childNode.minKey());
-//          keys[count - 1] = childNode.minKey();
-//        }
         nodes[count++] = childNode;
+        childNode.setParent(this);
       }
     }
 
-    @Override
-    public String toString() {
-      StringBuilder builder = new StringBuilder("InteriorNode ");
-
-      builder.append("( ");
-      for (int i = 1; i < nodes.length; i++) {
-        if (nodes[i] != null)
-          builder.append(nodes[i].minKey()).append(", "); // TODO: trailing comma
-      }
-      builder.append(") ");
+    public String toString()
+    {
+      StringBuilder builder = new StringBuilder();
+      if (parent() == null)
+        builder.append("RootNode");
+      else
+        builder.append("InteriorNode");
 
       builder.append("[");
-      for (int i = 0; i < count; i++) {
-        builder.append(nodes[i]).append(", "); // TODO: trailing comma
+      for (int i = 1; i < count; i++) {
+        builder.append(nodes[i].minKey());
+        if (i != (count - 1))
+          builder.append(", ");
       }
       builder.append("]");
       return builder.toString();
     }
 
-    public String preToString() {
-      StringBuilder builder = new StringBuilder(parent == null ? "RootNode [" : "InteriorNode [");
-      for (int i = 0; i < nodes.length; i++) {
-        builder.append(nodes[i].minKey()).append(", "); // TODO: trailing comma
-      }
-
-      builder.append("]");
-      return builder.toString();
-    }
-
-    public String postToString() {
+    public String toStringRecursive() {
       StringBuilder builder = new StringBuilder();
-
-      for (int i = 0; i < count; i++) {
-        builder.append(nodes[i].preToString()).append(" "); // TODO: trailing comma
+      int depth;
+      if (parent() == null)
+      {
+        builder.append("RootNode");
+        depth = 0;
+      }
+      else
+      {
+        depth = 1;
+        Node parent = parent();
+        while (parent != null)
+        {
+          builder.append("\t");
+          parent = parent.parent();
+          depth++;
+        }
+        builder.append("InteriorNode");
       }
 
-      for (int i = 0; i < count; i++) {
-        builder.append(nodes[i].postToString()).append(" "); // TODO: trailing comma
+      builder.append("[");
+      for (int i = 1; i < count; i++) {
+        if (nodes[i] !=null) //tood: remove
+          builder.append(nodes[i].minKey());
+        if (i != (count - 1))
+          builder.append(", ");
       }
+      builder.append("]");
 
+      builder.append("\n");
+      for (int i = 0; i < count; i++) {
+        if (i == 0 && nodes[i].isLeaf()) {
+          for (int j = 0; j < depth; j++) {
+            builder.append("\t");
+          }
+        }
+        if (nodes[i] == null) // todo: remove
+          continue;
+
+        builder.append(nodes[i].toStringRecursive());
+        if (nodes[i].isLeaf() && i != (count - 1))
+          builder.append(", ");
+      }
+      if (parent() != null)
+        builder.append("\n");
       return builder.toString();
     }
   }
@@ -191,11 +231,7 @@ public class BTreeBuilder<K extends Comparable, V> {
       return true;
     }
 
-    public String preToString() {
-      return toString();
-    }
-
-    public String postToString() {
+    public String toStringRecursive() {
       return toString();
     }
 
