@@ -42,7 +42,7 @@ public class BTreeTest {
     }
     btree.ingestSorted(input);
 
-    for (BTreeBuilder<Integer, String>.Node<Integer, String> integerStringNode : btree.rightmostParent.root()) {
+    for (BTreeBuilder<Integer, String>.Node integerStringNode : btree.rightmostParent.root()) {
 
     }
 
