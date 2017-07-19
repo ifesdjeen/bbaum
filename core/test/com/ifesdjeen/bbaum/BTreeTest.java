@@ -33,6 +33,24 @@ public class BTreeTest {
     System.out.println(btree.rightmostParent.root().toStringRecursive());
   }
 
+  @Test
+  public void testBTreeLeavesInSortedOrder() {
+    BTreeBuilder<Integer, String> btree = new BTreeBuilder<>(Integer.class, String.class, 3, null);
+    SortedMap<Integer, String> input = new TreeMap<>();
+    for (int i = 1; i <= 50; i++) {
+      input.put(i, Integer.toString(i));
+    }
+    btree.ingestSorted(input);
+
+    for (BTreeBuilder<Integer, String>.Node<Integer, String> integerStringNode : btree.rightmostParent.root()) {
+
+    }
+
+//    for (BTreeBuilder.Node o : btree.rightmostParent.root().iterator()) {
+//
+//    }
+  }
+
 //  @Test
 //  public void writeReadBTree() {
 //    BTreeBuilder<Integer, String> btree = new BTreeBuilder<>(Integer.class, String.class, 4, null);
@@ -55,5 +73,4 @@ public class BTreeTest {
 
 
 }
-
 

@@ -23,22 +23,21 @@ public class BTreeBuilder<K extends Comparable, V> {
     this.valueClass = valueClass;
   }
 
-  LeafNode currentLeaf;
-  InteriorNode rightmostParent;
+  LeafNode<K, V> currentLeaf;
+  InteriorNode<K, V> rightmostParent;
 
   public void ingestSorted(SortedMap<K, V> source) {
     // Create the root node
-    currentLeaf = new LeafNode();
-    rightmostParent = new InteriorNode();
-//    root = rightmostParent;
+    currentLeaf = new LeafNode<>();
+    rightmostParent = new InteriorNode<>();
 
     for (Map.Entry<K, V> kvEntry : source.entrySet()) {
       currentLeaf.add(kvEntry.getKey(), kvEntry.getValue());
 
       if (currentLeaf.isFull())
       {
-        rightmostParent.add(currentLeaf);
-        currentLeaf = new LeafNode();
+        rightmostParent.add(currentLeaf).ifPresent(nodes -> rightmostParent = nodes);
+        currentLeaf = new LeafNode<>();
       }
     }
 
@@ -51,7 +50,7 @@ public class BTreeBuilder<K extends Comparable, V> {
     return 0;
   }
 
-  public abstract class Node<K, V> {
+  public abstract class Node<K, V> implements Iterable<Node<K, V>> {
     final Node<K, V>[] children;
 
     private InteriorNode<K, V> parent;
@@ -59,7 +58,7 @@ public class BTreeBuilder<K extends Comparable, V> {
     int count;
     int size;
     public Node() {
-      children = (Node[]) Array.newInstance(Node.class, branchingFactor);
+      children = (Node<K, V>[]) Array.newInstance(Node.class, branchingFactor);
 
       this.count = 0;
       this.size = branchingFactor;
@@ -80,23 +79,25 @@ public class BTreeBuilder<K extends Comparable, V> {
       return parent;
     }
 
-    public InteriorNode root() {
+    public InteriorNode<K, V> root() {
       if (parent == null)
-        return (InteriorNode) this; // TODO: move down
+        return (InteriorNode<K, V>) this; // TODO: move down
       else
         return parent.root();
     }
 
-    public void setParent(InteriorNode parent) {
+    public void setParent(InteriorNode<K, V> parent) {
       this.parent = parent;
     }
+
+    public abstract Iterator<Node<K, V>> iterator();
 
     public abstract String toStringRecursive();
   }
 
   public class InteriorNode<K, V> extends Node<K, V> {
 
-    final Node<K, V>[] nodes;
+    private final Node<K, V>[] nodes;
 
     public InteriorNode() {
       nodes = getArray(Node.class, branchingFactor);
@@ -113,10 +114,13 @@ public class BTreeBuilder<K extends Comparable, V> {
       return false;
     }
 
-    public void add(Node<K, V> childNode) {
+    /**
+     * Returns the new rightmost parent if the previous one was full
+     */
+    public Optional<InteriorNode<K, V>> add(Node<K, V> childNode) {
       if (isFull()) {
         // If the current chold node is full, create a new sibling
-        InteriorNode<K, V> newSibling = new InteriorNode<K, V>();
+        InteriorNode<K, V> newSibling = new InteriorNode<>();
 
         // First root node
         if (parent() == null) { // TODO: handle useless root
@@ -125,18 +129,38 @@ public class BTreeBuilder<K extends Comparable, V> {
         }
 
         // and migrate the last written child node to this new sibling
-        newSibling.add(nodes[count - 1]);
         newSibling.add(childNode);
-        nodes[count - 1] = null;
-        count--;
         parent().add(newSibling);
+        System.out.println("childNode = " + childNode.isLeaf());
+        // new rightmost parent will always be created on the rightmost
+        // edge, which is closest to the leaves
         if (childNode.isLeaf())
-          rightmostParent = newSibling; // todo: make it stateless
+          return Optional.of(newSibling);
       }
       else {
         nodes[count++] = childNode;
         childNode.setParent(this);
       }
+
+      return Optional.empty();
+    }
+
+    public Iterator<Node<K, V>> iterator() {
+
+      return new Iterator<Node<K, V>>() {
+        final int length = children.length;
+        int i = 0;
+
+        @Override
+        public boolean hasNext() {
+          return i < length;
+        }
+
+        @Override
+        public Node<K, V> next() {
+          return children[i++];
+        }
+      };
     }
 
     public String toString()
@@ -175,11 +199,12 @@ public class BTreeBuilder<K extends Comparable, V> {
           parent = parent.parent();
           depth++;
         }
-        builder.append("InteriorNode");
+        builder.append("InteriorNode").append(size).append(' ');
       }
 
+
       builder.append("[");
-      for (int i = 1; i < count; i++) {
+      for (int i = 0; i < count; i++) {
         if (nodes[i] !=null) //tood: remove
           builder.append(nodes[i].minKey());
         if (i != (count - 1))
@@ -231,6 +256,11 @@ public class BTreeBuilder<K extends Comparable, V> {
       return true;
     }
 
+    @Override
+    public Iterator<Node<K, V>> iterator() {
+      return Iterators.empty();
+    }
+
     public String toStringRecursive() {
       return toString();
     }
@@ -242,8 +272,9 @@ public class BTreeBuilder<K extends Comparable, V> {
       count++;
     }
 
-    public String toString() {
-      StringBuilder builder = new StringBuilder("LeafNode [");
+    public String toString(){
+      StringBuilder builder = new StringBuilder("LeafNode");
+      builder.append(size).append(" [");
 
       for (int i = 0; i < count; i++) {
         builder.append(keys[i]).append(": ").append(vals[i]);
@@ -259,6 +290,15 @@ public class BTreeBuilder<K extends Comparable, V> {
   /**
    * Leaves are serialized
    */
+
+  // Serialise as much as fits into the block of 4K bytes.
+  // One of the ways to lay things out is to first lay out the nodes (knowing how much will fit)
+  // since each node is predictably-ordered, we can form the offset table in the end, which
+  // will be loaded into the memory for further traversal
+
+  // Another way to lay them out would be to pre-calculate the offsets upfront: for example,
+  // by saying
+  //
   public class LeafSerialiser {
     public void serialize(DataOutput out, LeafNode leaf) {
       // out.write();
