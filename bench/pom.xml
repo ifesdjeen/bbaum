@@ -20,7 +20,7 @@
 
   <dependencies>
     <dependency>
-      <groupId>com.ifesdjeen</groupId>
+      <groupId>com.github.ifesdjeen</groupId>
       <artifactId>bbaum-core</artifactId>
       <version>${bbaum.version}</version>
     </dependency>
