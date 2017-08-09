@@ -5,8 +5,11 @@ import org.junit.Assert;
 import org.junit.Test;
 
 import java.io.*;
+import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.function.Consumer;
+
+import static java.lang.System.out;
 
 public class BTreeTest {
 
@@ -19,7 +22,7 @@ public class BTreeTest {
 //  LeafNode [13: 13, 14: 14, 15: 15], LeafNode [16: 16, 17: 17, 18: 18]
     @Test
     public void testBTree() {
-        BTreeBuilder<Integer, String> btree = new BTreeBuilder<>(Integer.class, String.class, 3, null);
+        BTreeBuilder<Integer, String> btree = new BTreeBuilder<>(INTEGER_SERIALIZER, STRING_SERIALIZER, 3);
         SortedMap<Integer, String> input = new TreeMap<>();
         for (int i = 1; i <= 500; i++) {
             input.put(i, Integer.toString(i));
@@ -45,12 +48,12 @@ public class BTreeTest {
         btree.ingestSorted(input);
 
 
-        System.out.println(btree.rightmostParent.root().toStringRecursive());
+        out.println(btree.rightmostParent.root().toStringRecursive());
     }
 
     @Test
     public void testBTreeLeavesInSortedOrder() {
-        BTreeBuilder<Integer, String> btree = new BTreeBuilder<>(Integer.class, String.class, 3, null);
+        BTreeBuilder<Integer, String> btree = new BTreeBuilder<>(INTEGER_SERIALIZER, STRING_SERIALIZER, 3);
         SortedMap<Integer, String> input = new TreeMap<>();
         for (int i = 1; i <= 50; i++) {
             input.put(i, Integer.toString(i));
@@ -79,47 +82,25 @@ public class BTreeTest {
         return bb.toString();
     }
 
-    @Test
-    public void asd() throws Throwable {
-        new File("/tmp/test").delete();
-        RandomAccessFile rf = new RandomAccessFile("/tmp/test", "rw");
-        BTreeBuilder<String, String> btree = new BTreeBuilder<>(String.class, String.class, 3, null);
-        SortedMap<String, String> input = new TreeMap<>();
-        for (int i = 1; i <= 50; i++) {
-
-            input.put(repeat(alphabet.charAt(i % alphabet.length()), 3),
-                repeat(alphabet.charAt(i % alphabet.length()), 5));
-        }
-        btree.ingestSorted(input);
-
-        System.out.println(btree.rightmostParent.root().toStringRecursive());
-
-        new BTreeBuilder.TreeWriter<String, String>(new BTreeBuilder.Serializer<String>() {
-            @Override
-            public void serialize(DataOutput out, String s) throws IOException {
-                out.writeInt(s.length());
-                out.writeBytes(s);
-            }
-
-            @Override
-            public int sizeof(String s) {
-                return Integer.BYTES + s.length();
-            }
-        }, new BTreeBuilder.Serializer<String>() {
-            @Override
-            public void serialize(DataOutput out, String s) throws IOException {
-                out.writeInt(s.length());
-                out.writeBytes(s);
-            }
-
-            @Override
-            public int sizeof(String s) {
-                return Integer.BYTES + s.length();
-            }
-        }).serialize(rf, btree.rightmostParent.root());
-
-        rf.close();
-    }
+//    @Test
+//    public void asd() throws Throwable {
+//        new File("/tmp/test").delete();
+//        RandomAccessFile rf = new RandomAccessFile("/tmp/test", "rw");
+//        BTreeBuilder<String, String> btree = new BTreeBuilder<>(String.class, String.class, 3, null);
+//        SortedMap<String, String> input = new TreeMap<>();
+//        for (int i = 1; i <= 50; i++) {
+//
+//            input.put(repeat(alphabet.charAt(i % alphabet.length()), 3),
+//                repeat(alphabet.charAt(i % alphabet.length()), 5));
+//        }
+//        btree.ingestSorted(input);
+//
+//        out.println(btree.rightmostParent.root().toStringRecursive());
+//
+//        new BTreeBuilder.TreeWriter<String, String>(3, STRING_SERIALIZER, STRING_SERIALIZER).serialize(rf, btree.rightmostParent.root());
+//
+//        rf.close();
+//    }
 
 
     // Depth is growing only logarithmically, so that should not be a problem
@@ -134,6 +115,90 @@ public class BTreeTest {
                     depthFirst(child, callback);
                 }
             });
+    }
+
+    private static <K, V> BTreeBuilder.InternalNode<K, V> interiorNode(int fanout, BTreeBuilder.ValueSerializer<K> keySerializer, BTreeBuilder.ValueSerializer<V> valueSerializer) {
+        return new BTreeBuilder.InternalNode<K, V>(keySerializer, valueSerializer, fanout);
+    }
+
+    private static <K, V> BTreeBuilder.LeafNode<K, V> leaf(int fanout, BTreeBuilder.ValueSerializer<K> keySerializer, BTreeBuilder.ValueSerializer<V> valueSerializer) {
+        return BTreeBuilder.makeLeaf(keySerializer, valueSerializer, fanout);
+    }
+
+    private static BTreeBuilder.LeafNode<String, String> leaf(int fanout, String... kvps) {
+        assert kvps.length % 2 == 0;
+        BTreeBuilder.LeafNode<String, String> leafNode = leaf(fanout, STRING_SERIALIZER, STRING_SERIALIZER);
+        for (int i = 0; i < kvps.length; i += 2) {
+            leafNode.add(kvps[i], kvps[i + 1]);
+        }
+        return leafNode;
+
+    }
+
+    @Test
+    public void internalNodeSerializationTest() throws IOException {
+        final int FANOUT = 10;
+        ByteBuffer byteBuffer = ByteBuffer.allocate(BTreeBuilder.BLOCK_SIZE);
+
+        BTreeBuilder.InternalNode<String, String> node = interiorNode(FANOUT, STRING_SERIALIZER, STRING_SERIALIZER);
+        for (int i = 1; i <= FANOUT; i++) {
+            node.add(
+                leaf(FANOUT,
+                    repeat(alphabet.charAt(i % alphabet.length()), 3),
+                    repeat(alphabet.charAt(i % alphabet.length()), 5)));
+        }
+
+        node.serialize(byteBuffer);
+        byteBuffer.flip();
+        byteBuffer.rewind();
+        System.out.println("ByteBufferUtil.hexDump(byteBuffer) = " + ByteBufferUtil.prettyHexDump(byteBuffer));
+        // TODO: calculate node byte size
+    }
+
+    @Test
+    public void leafNodeSerializationTest() throws IOException {
+        final int FANOUT = 10;
+        ByteBuffer byteBuffer = ByteBuffer.allocate(BTreeBuilder.BLOCK_SIZE);
+
+        String[] kvps = new String[FANOUT * 2];
+        for (int i = 0; i < FANOUT * 2; i += 2) {
+            kvps[i] = repeat(alphabet.charAt(i % alphabet.length()), 3);
+            kvps[i + 1] = repeat(alphabet.charAt(i % alphabet.length()), 5);
+        }
+        BTreeBuilder.LeafNode<String, String> node = leaf(FANOUT, kvps);
+        node.serialize(byteBuffer);
+        byteBuffer.flip();
+        byteBuffer.rewind();
+        System.out.println("ByteBufferUtil.hexDump(byteBuffer) = " + ByteBufferUtil.prettyHexDump(byteBuffer));
+        // TODO: calculate node byte size
+    }
+
+    private static final BTreeBuilder.ValueSerializer<String> STRING_SERIALIZER = new StringSerializer();
+    private static final BTreeBuilder.ValueSerializer<Integer> INTEGER_SERIALIZER = new IntegerSerializer();
+    public static class IntegerSerializer implements BTreeBuilder.ValueSerializer<Integer> {
+
+        @Override
+        public void serialize(ByteBuffer out, Integer v) throws IOException {
+            out.putInt(v);
+        }
+
+        @Override
+        public int sizeof(Integer integer) {
+            return Integer.BYTES;
+        }
+    }
+    public static class StringSerializer implements BTreeBuilder.ValueSerializer<String> {
+
+        @Override
+        public void serialize(ByteBuffer out, String s) throws IOException {
+            out.putInt(s.length());
+            out.put(s.getBytes());
+        }
+
+        @Override
+        public int sizeof(String s) {
+            return Integer.BYTES + s.length();
+        }
     }
 
 //  @Test

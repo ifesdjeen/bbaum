@@ -2,14 +2,11 @@ package com.ifesdjeen.bbaum;
 
 import javafx.util.Pair;
 
-import java.io.DataOutput;
 import java.io.IOException;
-import java.io.RandomAccessFile;
 import java.lang.reflect.Array;
 import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.function.Consumer;
-import java.util.function.Function;
 
 // TODO: fixed term fanout optimisation
 // TODO: create from both sorted and unsorted data
@@ -19,17 +16,16 @@ public class BTreeBuilder<K extends Comparable, V> {
     private final static Iterator EMPTY_ITER = Collections.EMPTY_LIST.iterator();
 
     private final int fanout;
-    private final Function<K, ByteBuffer> converter;
-    private final Class<K> keyClass;
-    private final Class<V> valueClass;
+    private final ValueSerializer<K> keySerializer;
+    private final ValueSerializer<V> valueSerializer;
+
     LeafNode<K, V> currentLeaf;
     InternalNode<K, V> rightmostParent;
 
-    public BTreeBuilder(Class<K> keyClass, Class<V> valueClass, int fanout, Function<K, ByteBuffer> converter) {
+    public BTreeBuilder(ValueSerializer<K> keySerializer, ValueSerializer<V> valueSerializer, int fanout) {
         this.fanout = fanout;
-        this.converter = converter;
-        this.keyClass = keyClass;
-        this.valueClass = valueClass;
+        this.keySerializer = keySerializer;
+        this.valueSerializer = valueSerializer;
     }
 
     // TODO: memory fanout
@@ -44,7 +40,7 @@ public class BTreeBuilder<K extends Comparable, V> {
     public void ingestSorted(SortedMap<K, V> source) {
         // Create the root node
         currentLeaf = makeLeaf();
-        rightmostParent = makeInteriorNode();
+        rightmostParent = makeInternalNode();
 
         for (Map.Entry<K, V> kvEntry : source.entrySet()) {
             currentLeaf.add(kvEntry.getKey(), kvEntry.getValue());
@@ -62,11 +58,19 @@ public class BTreeBuilder<K extends Comparable, V> {
     }
 
     private LeafNode<K, V> makeLeaf() {
-        return new LeafNode<>(keyClass, valueClass, fanout);
+        return makeLeaf(keySerializer, valueSerializer, fanout);
     }
 
-    private InternalNode<K, V> makeInteriorNode() {
-        return new InternalNode<>(fanout);
+    public static <K, V> LeafNode<K, V> makeLeaf(ValueSerializer<K> keySerializer, ValueSerializer<V> valueSerializer, int fanout) {
+        return new LeafNode<K, V>(keySerializer, valueSerializer, fanout);
+    }
+
+    private InternalNode<K, V> makeInternalNode() {
+        return new InternalNode<K, V>(keySerializer, valueSerializer, fanout);
+    }
+
+    private static <K, V> InternalNode<K, V> makeInternalNode(InternalNode<K, V> parentNode) {
+        return new InternalNode<K, V>(parentNode.keySerializer, parentNode.valueSerializer, parentNode.fanout);
     }
 
     /**
@@ -82,12 +86,17 @@ public class BTreeBuilder<K extends Comparable, V> {
     // by saying
     //
     public interface Serializer<K> {
-        void serialize(DataOutput out, K k) throws IOException;
+        void serialize(ByteBuffer out) throws IOException;
+        int sizeof();
+        int blockSize();
+    }
 
+    public interface ValueSerializer<K> {
+        void serialize(ByteBuffer out, K v) throws IOException;
         int sizeof(K k);
     }
 
-    public static abstract class Node<K, V> {
+    public static abstract class Node<K, V> implements Serializer<Node<K, V>> {
         final int fanout;
         int count;
         private InternalNode<K, V> parent;
@@ -177,10 +186,15 @@ public class BTreeBuilder<K extends Comparable, V> {
     public static class InternalNode<K, V> extends Node<K, V> implements Iterable<Node<K, V>> {
 
         private final Node<K, V>[] nodes;
+        private final ValueSerializer<K> keySerializer;
+        private final ValueSerializer<V> valueSerializer;
 
-        public InternalNode(int branchingFactor) {
+        public InternalNode(ValueSerializer<K> keySerializer, ValueSerializer<V> valueSerializer, int branchingFactor) {
             super(branchingFactor);
-            nodes = getArray(Node.class, branchingFactor);
+
+            this.nodes = getArray(Node.class, branchingFactor);
+            this.keySerializer = keySerializer;
+            this.valueSerializer = valueSerializer;
         }
 
         @Override
@@ -207,11 +221,11 @@ public class BTreeBuilder<K extends Comparable, V> {
         public Optional<InternalNode<K, V>> add(Node<K, V> childNode) {
             if (isFull()) {
                 // If the current chold node is full, create a new sibling
-                InternalNode<K, V> newSibling = new InternalNode<>(fanout);
+                InternalNode<K, V> newSibling = makeInternalNode(this);
 
                 // First root node
                 if (parent() == null) { // TODO: handle useless root
-                    setParent(new InternalNode<>(fanout));
+                    setParent(makeInternalNode(this));
                     parent().add(this);
                 }
 
@@ -312,17 +326,83 @@ public class BTreeBuilder<K extends Comparable, V> {
                 builder.append("\n");
             return builder.toString();
         }
+
+        /**
+         * (byte info)
+         * <p>
+         * Next two are only present on in the root node:
+         * ( short16 min_key_length) ( min_key_length bytes min_key)
+         * ( short16 max_key_length) ( min_key_length bytes max_key)
+         * <p>
+         * ( short16 children_count )
+         * children_count * [ (short16 key_length) ]
+         * children_count * [ (key_length bytes key) ]
+         * // THAT IS PULLED UP (children_count + 1) * [ (int32 child_offset) ]
+         * <p>
+         * TODO: fixed fanout keys
+         * TODO: calculate offset in blocks!
+         */
+        @Override
+        public void serialize(ByteBuffer out) throws IOException {
+            out.put((byte) (isRoot() ? 0 : 1));
+
+            if (isRoot()) {
+                keySerializer.serialize(out, minKey());
+                keySerializer.serialize(out, maxKey());
+            }
+
+            out.putShort((short) (count - 1));
+
+            int childOffset = 0;
+            for (Node<K, V> child : butFirst(this)) {
+                out.putShort((short) childOffset);
+                childOffset += keySerializer.sizeof(child.minKey()) + Short.BYTES;
+            }
+
+            int blockOffset = 0;
+            for (Node<K, V> child : butFirst(this)) {
+                keySerializer.serialize(out, child.minKey());
+                out.putShort((short) blockOffset);
+                blockOffset += child.blockSize();
+            }
+        }
+
+        @Override
+        public int sizeof() {
+            int size = Short.BYTES;
+            if (isRoot()) {
+                size += 2 * Short.BYTES;
+            }
+
+            size += Short.BYTES + (count - 1) * Short.BYTES;
+
+            for (Node<K, V> child : butFirst(this)) {
+                keySerializer.sizeof(child.minKey());
+            }
+
+            return size;
+        }
+
+        @Override
+        public int blockSize() {
+            int size = sizeof();
+            return size < BLOCK_SIZE ? 1 : ((size / BLOCK_SIZE) + 1);
+        }
     }
 
     public static class LeafNode<K, V> extends Node<K, V> implements Iterable<Pair<K, V>> {
 
         final K[] keys;
         final V[] vals;
+        private final ValueSerializer<K> keySerializer;
+        private final ValueSerializer<V> valueSerializer;
 
-        private LeafNode(Class<K> keyClass, Class<V> valueClass, int branchingFactor) {
+        private LeafNode(ValueSerializer<K> keySerializer, ValueSerializer<V> valueSerializer, int branchingFactor) {
             super(branchingFactor);
-            keys = getArray(keyClass, branchingFactor);
-            vals = getArray(valueClass, branchingFactor);
+            keys = (K[])getArray(Object.class, branchingFactor);
+            vals = (V[])getArray(Object.class, branchingFactor);
+            this.keySerializer = keySerializer;
+            this.valueSerializer = valueSerializer;
         }
 
         public K minKey() {
@@ -382,212 +462,195 @@ public class BTreeBuilder<K extends Comparable, V> {
             builder.append("]");
             return builder.toString();
         }
-    }
 
-    // TODO: do dynamic block sizing!
-    // TODO: layout the nodes each one node per block; then the nodes are sequentially numbered and addressable
-    // do overflow area for the nodes
-    private static int BLOCK_SIZE = 4096;
+        /**
+         * (byte info)
+         * <p>
+         * <p>
+         * ( short16 children_count )
+         * children_count * [ (short16 key_length) ]
+         * children_count * [ (key_length bytes key) ]
+         * // THAT IS PULLED UP (children_count + 1) * [ (int32 child_offset) ]
+         * <p>
+         * TODO: fixed fanout keys
+         * TODO: calculate offset in blocks!
+         */
+        @Override
+        public void serialize(ByteBuffer out) throws IOException {
+            out.put((byte) 2);
 
-    // TODO: optimise for the case of PointerNode, which has only one child
+            out.putShort((short) count);
+            int offset = 0;
+            // Can we reduce an amount of iterations?
+            for (Pair<K, V> kvPair : this) {
+                out.putShort((short) offset);
+                // TODO: 0 can be skipped
+                offset += keySerializer.sizeof(kvPair.getKey());
+                out.putShort((short) offset);
+                offset += valueSerializer.sizeof(kvPair.getValue());
+            }
 
-    public static class TreeWriter<K, V> {
-
-//        LeafNodeSe<K, V> internalNodeSerializer;
-        private final InternalNodeSerializer<K, V> internalNodeSerializer;
-        private final LeafNodeSerializer<K, V> leafNodeSerializer;
-
-        public TreeWriter(Serializer<K> keySerializer, Serializer<V> valueSerializer) {
-            this.leafNodeSerializer = new LeafNodeSerializer<K, V>(keySerializer, valueSerializer);
-            this.internalNodeSerializer = new InternalNodeSerializer<K, V>(keySerializer, valueSerializer);
-        }
-
-        // TODO: switch to channel & something else?
-        public void serialize(RandomAccessFile out, InternalNode<K, V> root) throws IOException {
-            Node<K, V> firstInLevel = root;
-
-            while (firstInLevel != null) {
-                Iterator<Node<K, V>> siblings = firstInLevel.siblings();
-
-                int childOffset = 0;
-                while (siblings.hasNext()) {
-                    Node<K, V> current = siblings.next();
-                    System.out.println("current = " + current);
-
-                    if (current.isLeaf()) {
-                        LeafNode<K, V> cast = (LeafNode<K, V>) current;
-                        leafNodeSerializer.serialize(out, cast);
-                        out.writeLong(childOffset);
-                    } else {
-                        InternalNode<K, V> cast = (InternalNode<K, V>) current;
-                        internalNodeSerializer.serialize(out, cast);
-                        out.writeLong(childOffset);
-
-                        // The beginning of the "node" specified by the child starts where the
-                        for (Node<K, V> grandchild : cast) {
-                            if (grandchild.isLeaf())
-                                childOffset += leafNodeSerializer.sizeof((LeafNode<K, V>) grandchild) + Long.BYTES;
-                            else
-                                childOffset += internalNodeSerializer.sizeof((InternalNode<K, V>) grandchild) + Long.BYTES;
-                        }
-                    }
-
-                    if (current.isLeaf()) {
-                        leafNodeSerializer.serialize(out, (LeafNode<K, V>) current);
-                    } else {
-                        internalNodeSerializer.serialize(out, (InternalNode<K, V>) current);
-                    }
-                    align(out, BLOCK_SIZE);
-                }
-
-                if (firstInLevel.isLeaf())
-                    break;
-                else {
-                    firstInLevel = ((InternalNode<K, V>) firstInLevel).iterator().next();
-                }
+            for (Pair<K, V> kvPair : this) {
+                keySerializer.serialize(out, kvPair.getKey());
+                valueSerializer.serialize(out, kvPair.getValue());
             }
         }
 
-        public static long align(long val, int boundary)
-        {
-            return (val + boundary) & ~(boundary - 1);
+        @Override
+        public int sizeof() {
+            return 0;
         }
 
-        private void align(RandomAccessFile out, int blockSize) throws IOException {
-            long endOfBlock = out.getFilePointer();
-            if ((endOfBlock & (BLOCK_SIZE - 1)) != 0) // align on the block boundary if needed
-                out.seek(align(out.getFilePointer(), blockSize));
-        }
-    }
-
-    public class LeafSerialiser implements Serializer<LeafNode<K, V>> {
-        public void serialize(DataOutput out, LeafNode leaf) {
-            // out.write();
-        }
-
-        public int sizeof(LeafNode<K, V> pairs) {
+        @Override
+        public int blockSize() {
             return 0;
         }
     }
 
+    // TODO: do dynamic block sizing! in order to calculate the dynamic block size, we should know
+    // the sizes of the nodes and their occupancy. One approach would be to know how many blocks
+    // each node takes and be able to skip to the node just based on its' sequence number and
+    // use overflow blocks for the nodes that do not fit.
+    //
+    // The other one would be to just know how many blocks each node takes and have "block address"
+    // assigned to it
+    //
+    // Inside one node, however, we will have a luxury of navigating in a much simpler way, since
+    // we will only care about offsets inside the block
 
-    /**
-     * (byte info)
-     * <p>
-     * Next two are only present on in the root node:
-     * ( short16 min_key_length) ( min_key_length bytes min_key)
-     * ( short16 max_key_length) ( min_key_length bytes max_key)
-     * <p>
-     * ( short16 childrean_count )
-     * children_count * [ (short16 key_length) ]
-     * children_count * [ (key_length bytes key) ]
-     * // THAT IS PULLED UP (children_count + 1) * [ (int32 child_offset) ]
-     * <p>
-     * TODO: fixed fanout keys
-     * TODO: calculate offset in blocks!
-     */
-    public static class InternalNodeSerializer<K, V> implements Serializer<InternalNode<K, V>> {
+    // TODO: layout the nodes each one node per block; then the nodes are sequentially numbered and addressable
+    // do overflow area for the nodes
+    public static int BLOCK_SIZE = 4096;
 
-        private final Serializer<K> keySerializer;
-        private final Serializer<V> valueSerializer;
+    // TODO: optimise for the case of PointerNode, which has only one child
 
-        public InternalNodeSerializer(Serializer<K> keySerializer, Serializer<V> valueSerializer) {
-            this.keySerializer = keySerializer;
-            this.valueSerializer = valueSerializer;
-        }
-
-        public void serialize(DataOutput out, InternalNode<K, V> node) throws IOException {
-            out.writeByte(0);
-
-            if (node.isRoot()) {
-                keySerializer.serialize(out, node.minKey());
-                keySerializer.serialize(out, node.maxKey());
-            }
-
-            out.write(node.count - 1);
-
-            // TODO: get rid of so many iterations!
-
-            int childOffset = 0;
-            for (Node<K, V> child : butFirst(node)) {
-                out.writeShort(childOffset);
-                childOffset += keySerializer.sizeof(child.minKey());
-            }
-
-            for (Node<K, V> child : butFirst(node)) {
-                keySerializer.serialize(out, child.minKey());
-            }
-        }
-
-        public int sizeof(InternalNode<K, V> node) {
-            int size = Byte.BYTES;
-            if (node.isRoot()) {
-                size += 2 * Short.BYTES;
-            }
-
-            size += Short.BYTES + (node.count - 1) * Short.BYTES;
-
-            // TODO: fixed fanout keys!
-            for (Node<K, V> child : butFirst(node)) {
-                keySerializer.sizeof(child.minKey());
-            }
-
-            return size;
-        }
-    }
-
-    public static class LeafNodeSerializer<K, V> implements  Serializer<LeafNode<K, V>> {
-
-        private final Serializer<K> keySerializer;
-        private final Serializer<V> valueSerializer;
-
-        public LeafNodeSerializer(Serializer<K> keySerializer, Serializer<V> valueSerializer) {
-            this.keySerializer = keySerializer;
-            this.valueSerializer = valueSerializer;
-        }
-
-        /**
-         * (short16 child_count)
-         * child_count * [(long64 child_entry_offset) (short16 key_length)]
-         * child_count * []
-         */
-        @Override
-        public void serialize(DataOutput out, LeafNode<K, V> node) throws IOException {
-            out.writeShort(node.count);
-
-            int childOffset = 0;
-            for (Pair<K, V> pair : node) {
-                out.writeLong(childOffset);
-                short keySize = (short) keySerializer.sizeof(pair.getKey());
-                childOffset += keySize;
-                out.writeShort(keySize);
-                childOffset += valueSerializer.sizeof(pair.getValue());
-            }
+//    public static class TreeWriter<K, V> {
+//
+////        LeafNodeSe<K, V> internalNodeSerializer;
+//        private final LeafNodeSerializer<K, V> leafNodeSerializer;
+//
+//        public TreeWriter(Serializer<K> keySerializer, Serializer<V> valueSerializer) {
+//            this.leafNodeSerializer = new LeafNodeSerializer<K, V>(keySerializer, valueSerializer);
+//        }
+//
+//        // TODO: switch to channel & something else?
+//        public void serialize(RandomAccessFile out, InternalNode<K, V> root) throws IOException {
+//            Node<K, V> firstInLevel = root;
+//
+//            while (firstInLevel != null) {
+//                Iterator<Node<K, V>> siblings = firstInLevel.siblings();
+//
+//                int childOffset = 0;
+//                while (siblings.hasNext()) {
+//                    Node<K, V> current = siblings.next();
+//                    System.out.println("current = " + current);
+//
+//                    if (current.isLeaf()) {
+//                        LeafNode<K, V> cast = (LeafNode<K, V>) current;
+//                        leafNodeSerializer.serialize(out, cast);
+//                        out.writeLong(childOffset);
+//                    } else {
+//                        InternalNode<K, V> cast = (InternalNode<K, V>) current;
+//                        internalNodeSerializer.serialize(out, cast);
+//                        out.writeLong(childOffset);
+//
+//                        // The beginning of the "node" specified by the child starts where the
+//                        for (Node<K, V> grandchild : cast) {
+//                            if (grandchild.isLeaf())
+//                                childOffset += leafNodeSerializer.sizeof((LeafNode<K, V>) grandchild) + Long.BYTES;
+//                            else
+//                                childOffset += internalNodeSerializer.sizeof((InternalNode<K, V>) grandchild) + Long.BYTES;
+//                        }
+//                    }
+//
+//                    if (current.isLeaf()) {
+//                        leafNodeSerializer.serialize(out, (LeafNode<K, V>) current);
+//                    } else {
+//                        internalNodeSerializer.serialize(out, (InternalNode<K, V>) current);
+//                    }
+//                    align(out, BLOCK_SIZE);
+//                }
+//
+//                if (firstInLevel.isLeaf())
+//                    break;
+//                else {
+//                    firstInLevel = ((InternalNode<K, V>) firstInLevel).iterator().next();
+//                }
+//            }
+//        }
+//
+//        public static long align(long val, int boundary)
+//        {
+//            return (val + boundary) & ~(boundary - 1);
+//        }
+//
+//        private void align(RandomAccessFile out, int blockSize) throws IOException {
+//            long endOfBlock = out.getFilePointer();
+//            if ((endOfBlock & (BLOCK_SIZE - 1)) != 0) // align on the block boundary if needed
+//                out.seek(align(out.getFilePointer(), blockSize));
+//        }
+//    }
 
 
-            for (Pair<K, V> pair : node) {
-                keySerializer.serialize(out, pair.getKey());
-                out.writeInt(valueSerializer.sizeof(pair.getValue()));
-                valueSerializer.serialize(out, pair.getValue());
-                childOffset += valueSerializer.sizeof(pair.getValue());
-            }
 
 
-        }
-
-        @Override
-        public int sizeof(LeafNode<K, V> node) {
-            int size = Short.BYTES;
-
-            size += node.count * (Long.BYTES + Short.BYTES);
-
-            for (Pair<K, V> pair : node) {
-                size += keySerializer.sizeof(pair.getKey()) + Integer.SIZE + valueSerializer.sizeof(pair.getValue());
-            }
-
-            return size;
-        }
-    }
+//    public static class LeafNodeSerializer<K, V> implements Serializer<LeafNode<K, V>> {
+//
+//        private final Serializer<K> keySerializer;
+//        private final Serializer<V> valueSerializer;
+//
+//        public LeafNodeSerializer(Serializer<K> keySerializer, Serializer<V> valueSerializer) {
+//            this.keySerializer = keySerializer;
+//            this.valueSerializer = valueSerializer;
+//        }
+//
+//        /**
+//         * (short16 child_count)
+//         * child_count * [(long64 child_entry_offset) (short16 key_length)]
+//         * child_count * []
+//         */
+//        @Override
+//        public void serialize(DataOutput out, LeafNode<K, V> node) throws IOException {
+//            out.writeShort(node.count);
+//
+//            int childOffset = 0;
+//            for (Pair<K, V> pair : node) {
+//                out.writeLong(childOffset);
+//                short keySize = (short) keySerializer.sizeof(pair.getKey());
+//                childOffset += keySize;
+//                out.writeShort(keySize);
+//                childOffset += valueSerializer.sizeof(pair.getValue());
+//            }
+//
+//
+//            for (Pair<K, V> pair : node) {
+//                keySerializer.serialize(out, pair.getKey());
+//                out.writeInt(valueSerializer.sizeof(pair.getValue()));
+//                valueSerializer.serialize(out, pair.getValue());
+//                childOffset += valueSerializer.sizeof(pair.getValue());
+//            }
+//
+//
+//        }
+//
+//        @Override
+//        public void serialize(ByteBuffer out, LeafNode<K, V> pairs) throws IOException {
+//
+//        }
+//
+//        @Override
+//        public int sizeof(LeafNode<K, V> node) {
+//            int size = Short.BYTES;
+//
+//            size += node.count * (Long.BYTES + Short.BYTES);
+//
+//            for (Pair<K, V> pair : node) {
+//                size += keySerializer.sizeof(pair.getKey()) + Integer.SIZE + valueSerializer.sizeof(pair.getValue());
+//            }
+//
+//            return size;
+//        }
+//    }
 
     public static <T> Iterable<T> butFirst(Iterable<T> orig) {
         return new Iterable<T>() {
