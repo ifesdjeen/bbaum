@@ -23,7 +23,7 @@
     <guava.version>14.0.1</guava.version>
     <argLine.common>
       -server
-      -dsa -da
+      -dsa -da -ea
       -XX:+AggressiveOpts
       -XX:+TieredCompilation
       -XX:+UseBiasedLocking
@@ -70,6 +70,7 @@
         <artifactId>maven-surefire-plugin</artifactId>
         <version>2.18.1</version>
         <configuration>
+	  <enableAssertions>true</enableAssertions>
           <includes>
             <include>**/*Test*.java</include>
           </includes>
