@@ -6,6 +6,8 @@ import org.junit.Test;
 
 import java.io.*;
 import java.nio.ByteBuffer;
+import java.nio.file.Files;
+import java.nio.file.StandardOpenOption;
 import java.util.*;
 import java.util.function.Consumer;
 
@@ -82,25 +84,35 @@ public class BTreeTest {
         return bb.toString();
     }
 
-//    @Test
-//    public void asd() throws Throwable {
-//        new File("/tmp/test").delete();
-//        RandomAccessFile rf = new RandomAccessFile("/tmp/test", "rw");
-//        BTreeBuilder<String, String> btree = new BTreeBuilder<>(String.class, String.class, 3, null);
-//        SortedMap<String, String> input = new TreeMap<>();
-//        for (int i = 1; i <= 50; i++) {
-//
-//            input.put(repeat(alphabet.charAt(i % alphabet.length()), 3),
-//                repeat(alphabet.charAt(i % alphabet.length()), 5));
-//        }
-//        btree.ingestSorted(input);
-//
-//        out.println(btree.rightmostParent.root().toStringRecursive());
-//
+    @Test
+    public void asd() throws Throwable {
+        String file = "/tmp/test";
+        new File(file).delete();
+        BTreeBuilder<String, String> btree = new BTreeBuilder<>(STRING_SERIALIZER, STRING_SERIALIZER, 3);
+        SortedMap<String, String> input = new TreeMap<>();
+        for (int i = 1; i <= 100; i++) {
+            input.put(repeat(alphabet.charAt(i % alphabet.length()), 3) + (i / alphabet.length()),
+                repeat(alphabet.charAt(i % alphabet.length()), 5) + (i / alphabet.length())
+            );
+        }
+        btree.ingestSorted(input);
+
+        out.println(btree.rightmostParent.root().toStringRecursive());
+
+        OutputStream os = Files.newOutputStream(new File(file).toPath(), StandardOpenOption.CREATE);
+        btree.serializeTree(os);
+        os.flush();
 //        new BTreeBuilder.TreeWriter<String, String>(3, STRING_SERIALIZER, STRING_SERIALIZER).serialize(rf, btree.rightmostParent.root());
-//
-//        rf.close();
-//    }
+
+        os.close();
+
+        BTree<String, String> tree = new BTree<String, String>(file, STRING_SERIALIZER, STRING_SERIALIZER);
+        System.out.println("tree.nodesOnLevel(1) = " + tree.nodesOnLevel(1));
+        System.out.println("tree.nodesOnLevel(2) = " + tree.nodesOnLevel(2));
+        String s = ByteBufferUtil.prettyHexDump(tree.getNode(1, 0, 2));
+        System.out.println(s);
+        // TODO: test to validate tree integrity, down to the node level
+    }
 
 
     // Depth is growing only logarithmically, so that should not be a problem
@@ -110,7 +122,7 @@ public class BTreeTest {
                 callback.accept(kvPair);
             }
         })
-            .ifInterior((interior) -> {
+            .ifInternal((interior) -> {
                 for (BTreeBuilder.Node<K, V> child : interior) {
                     depthFirst(child, callback);
                 }
@@ -183,6 +195,11 @@ public class BTreeTest {
         }
 
         @Override
+        public Integer deserialize(ByteBuffer out) throws IOException {
+            return out.getInt();
+        }
+
+        @Override
         public int sizeof(Integer integer) {
             return Integer.BYTES;
         }
@@ -193,6 +210,14 @@ public class BTreeTest {
         public void serialize(ByteBuffer out, String s) throws IOException {
             out.putInt(s.length());
             out.put(s.getBytes());
+        }
+
+        @Override
+        public String deserialize(ByteBuffer out) throws IOException {
+            int length = out.getInt();
+            byte[] bytes = new byte[length];
+            out.get(bytes);
+            return new String(bytes);
         }
 
         @Override

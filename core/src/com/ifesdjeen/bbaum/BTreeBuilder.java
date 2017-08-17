@@ -2,7 +2,7 @@ package com.ifesdjeen.bbaum;
 
 import javafx.util.Pair;
 
-import java.io.IOException;
+import java.io.*;
 import java.lang.reflect.Array;
 import java.nio.ByteBuffer;
 import java.util.*;
@@ -11,6 +11,7 @@ import java.util.function.Consumer;
 // TODO: fixed term fanout optimisation
 // TODO: create from both sorted and unsorted data
 // TODO: query modes?
+// TODO: pre-calculate the size of the tree!!
 public class BTreeBuilder<K extends Comparable, V> {
 
     private final static Iterator EMPTY_ITER = Collections.EMPTY_LIST.iterator();
@@ -21,6 +22,8 @@ public class BTreeBuilder<K extends Comparable, V> {
 
     LeafNode<K, V> currentLeaf;
     InternalNode<K, V> rightmostParent;
+    int totalCount = 0;
+    int totalNodes = 0;
 
     public BTreeBuilder(ValueSerializer<K> keySerializer, ValueSerializer<V> valueSerializer, int fanout) {
         this.fanout = fanout;
@@ -28,7 +31,7 @@ public class BTreeBuilder<K extends Comparable, V> {
         this.valueSerializer = valueSerializer;
     }
 
-    // TODO: memory fanout
+    // TODO: memory estimate
     private static int memorySize() {
         return 0;
     }
@@ -51,6 +54,7 @@ public class BTreeBuilder<K extends Comparable, V> {
                 currentLeaf.setNext(newLeaf);
                 currentLeaf = newLeaf;
             }
+            totalCount ++;
         }
 
         if (!currentLeaf.isEmpty())
@@ -58,6 +62,7 @@ public class BTreeBuilder<K extends Comparable, V> {
     }
 
     private LeafNode<K, V> makeLeaf() {
+        totalNodes++;
         return makeLeaf(keySerializer, valueSerializer, fanout);
     }
 
@@ -66,16 +71,13 @@ public class BTreeBuilder<K extends Comparable, V> {
     }
 
     private InternalNode<K, V> makeInternalNode() {
+        totalNodes++;
         return new InternalNode<K, V>(keySerializer, valueSerializer, fanout);
     }
 
     private static <K, V> InternalNode<K, V> makeInternalNode(InternalNode<K, V> parentNode) {
         return new InternalNode<K, V>(parentNode.keySerializer, parentNode.valueSerializer, parentNode.fanout);
     }
-
-    /**
-     * Leaves are serialized
-     */
 
     // Serialise as much as fits into the block of 4K bytes.
     // One of the ways to lay things out is to first lay out the nodes (knowing how much will fit)
@@ -93,7 +95,75 @@ public class BTreeBuilder<K extends Comparable, V> {
 
     public interface ValueSerializer<K> {
         void serialize(ByteBuffer out, K v) throws IOException;
+        K deserialize(ByteBuffer out) throws IOException;
         int sizeof(K k);
+    }
+
+    private static void resetBuffer(ByteBuffer buffer) {
+        buffer.flip();
+        buffer.rewind();
+        Arrays.fill(buffer.array(), (byte) 0);
+        buffer.limit(BLOCK_SIZE);
+    }
+
+    public void serializeTree(OutputStream output) throws IOException {
+        InternalNode<K, V> root = rightmostParent.root();
+        ByteBuffer buffer = ByteBuffer.allocate(BLOCK_SIZE);
+
+        buffer.putInt(fanout);
+        buffer.putInt(totalCount);
+        buffer.putInt(totalNodes);
+        keySerializer.serialize(buffer, root.minKey());
+        keySerializer.serialize(buffer, root.maxKey());
+
+        // TODO: encode the node size in the header as well.
+        // TODO: optimise
+        {
+            Node<K, V> firstInLevel = root.iterator().next();
+            int blockOffset = 0;
+            while (firstInLevel != null) {
+                Iterator<Node<K,V>> levelIterator = firstInLevel.siblings();
+                while (levelIterator.hasNext()) {
+                    buffer.putInt(blockOffset);
+                    blockOffset += levelIterator.next().blockSize();
+                }
+
+                if (firstInLevel.isLeaf()) {
+                    break;
+                } else {
+                    firstInLevel = ((InternalNode<K,V>)firstInLevel).iterator().next();
+                }
+            }
+        }
+
+        System.out.println("ByteBufferUtil.prettyHexDump(buffer); = " + ByteBufferUtil.hexDump(buffer.array()));
+        output.write(buffer.array());
+        resetBuffer(buffer);
+
+        root.serialize(buffer);
+        resetBuffer(buffer);
+
+        Node<K, V> firstInLevel = root.iterator().next(); // TODO: assert not empty
+        while (firstInLevel != null)
+        {
+            System.out.println("firstInLevel = " + firstInLevel);
+            Iterator<Node<K, V>> levelIterator = firstInLevel.siblings();
+
+            while (levelIterator.hasNext()) {
+                Node<K, V> currentNode = levelIterator.next();
+                currentNode.serialize(buffer);
+                output.write(buffer.array());
+                resetBuffer(buffer);
+            }
+
+            if (firstInLevel.isLeaf()) {
+                break;
+            }
+            else {
+                firstInLevel = ((InternalNode<K, V>) firstInLevel).iterator().next();
+            }
+        }
+
     }
 
     public static abstract class Node<K, V> implements Serializer<Node<K, V>> {
@@ -117,9 +187,9 @@ public class BTreeBuilder<K extends Comparable, V> {
             return this;
         }
 
-        public Node<K, V> ifInterior(Consumer<InternalNode<K, V>> c) {
+        public Node<K, V> ifInternal(Consumer<InternalNode<K, V>> c) {
             if (!isLeaf())
-                c.accept((InternalNode) this);
+                c.accept((InternalNode<K, V>) this);
             return this;
         }
 
@@ -181,6 +251,8 @@ public class BTreeBuilder<K extends Comparable, V> {
         }
 
         public abstract String toStringRecursive();
+
+
     }
 
     public static class InternalNode<K, V> extends Node<K, V> implements Iterable<Node<K, V>> {
@@ -188,8 +260,9 @@ public class BTreeBuilder<K extends Comparable, V> {
         private final Node<K, V>[] nodes;
         private final ValueSerializer<K> keySerializer;
         private final ValueSerializer<V> valueSerializer;
+//        private final int parentIdx;
 
-        public InternalNode(ValueSerializer<K> keySerializer, ValueSerializer<V> valueSerializer, int branchingFactor) {
+        InternalNode(ValueSerializer<K> keySerializer, ValueSerializer<V> valueSerializer, int branchingFactor) {
             super(branchingFactor);
 
             this.nodes = getArray(Node.class, branchingFactor);
@@ -220,11 +293,11 @@ public class BTreeBuilder<K extends Comparable, V> {
          */
         public Optional<InternalNode<K, V>> add(Node<K, V> childNode) {
             if (isFull()) {
-                // If the current chold node is full, create a new sibling
+                // If the current child node is full, create a new sibling
                 InternalNode<K, V> newSibling = makeInternalNode(this);
 
-                // First root node
-                if (parent() == null) { // TODO: handle useless root
+                // Root node got split, create a new root
+                if (parent() == null) { // TODO: handle useless root in case of a single node
                     setParent(makeInternalNode(this));
                     parent().add(this);
                 }
@@ -234,7 +307,7 @@ public class BTreeBuilder<K extends Comparable, V> {
                 parent().add(newSibling);
                 setNext(newSibling);
 
-                System.out.println("childNode = " + childNode.isLeaf());
+//                System.out.println("childNode = " + childNode.isLeaf());
                 // new rightmost parent will always be created on the rightmost
                 // edge, which is closest to the leaves
                 if (childNode.isLeaf())
@@ -344,12 +417,8 @@ public class BTreeBuilder<K extends Comparable, V> {
          */
         @Override
         public void serialize(ByteBuffer out) throws IOException {
+//            assert !isRoot(); // root should've been serialized in the header
             out.put((byte) (isRoot() ? 0 : 1));
-
-            if (isRoot()) {
-                keySerializer.serialize(out, minKey());
-                keySerializer.serialize(out, maxKey());
-            }
 
             out.putShort((short) (count - 1));
 
@@ -498,12 +567,24 @@ public class BTreeBuilder<K extends Comparable, V> {
 
         @Override
         public int sizeof() {
-            return 0;
+            int size = 0;
+
+            size += Byte.BYTES + Short.BYTES;
+
+            for (Pair<K, V> kvPair : this) {
+                // first loop
+                size += 2 * Short.BYTES;
+                size += keySerializer.sizeof(kvPair.getKey());
+                size += valueSerializer.sizeof(kvPair.getValue());
+            }
+
+            return size;
         }
 
         @Override
         public int blockSize() {
-            return 0;
+            int size = sizeof();
+            return size < BLOCK_SIZE ? 1 : ((size / BLOCK_SIZE) + 1);
         }
     }
 
