@@ -109,7 +109,7 @@ public class BTreeTest {
         BTree<String, String> tree = new BTree<String, String>(file, STRING_SERIALIZER, STRING_SERIALIZER);
         System.out.println("tree.nodesOnLevel(1) = " + tree.nodesOnLevel(1));
         System.out.println("tree.nodesOnLevel(2) = " + tree.nodesOnLevel(2));
-        String s = ByteBufferUtil.prettyHexDump(tree.getNode(1, 0, 2));
+        String s = ByteBufferUtil.prettyHexDump(tree.getNode(1, 0, 1));
         System.out.println(s);
         // TODO: test to validate tree integrity, down to the node level
     }

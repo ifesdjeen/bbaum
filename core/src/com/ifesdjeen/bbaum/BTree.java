@@ -1,5 +1,7 @@
 package com.ifesdjeen.bbaum;
 
+import sun.reflect.generics.reflectiveObjects.NotImplementedException;
+
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -16,7 +18,7 @@ public class BTree<K, V> {
     private final K min;
     private final K max;
     private final int totalCount;
-    private final int[] nodeOffsets;
+    private final int[][] nodeOffsets;
     private final int fanout;
     private final int levels;
 
@@ -37,23 +39,25 @@ public class BTree<K, V> {
         levels = (int) Math.ceil(Math.log(totalCount) / Math.log(fanout));
         System.out.println("totalCount = " + totalCount);
         System.out.println("levels = " + levels);
-        System.out.println("nodesOnLevel(0) = " + nodesOnLevel(0));
-        System.out.println("nodesOnLevel(1) = " + nodesOnLevel(1));
-        System.out.println("nodesOnLevel(2) = " + nodesOnLevel(2));
-        System.out.println("nodesOnLevel(3) = " + nodesOnLevel(3));
 
-        nodeOffsets = new int[byteBuffer.getInt()];
         this.min = keySerializer.deserialize(byteBuffer);
         this.max = keySerializer.deserialize(byteBuffer);
 
-        for (int i = 0; i < nodeOffsets.length; i++) {
-            this.nodeOffsets[i] = byteBuffer.getInt();
+        nodeOffsets = new int[levels][];
+        for (int i = 0; i < levels; i++) {
+            int levelSize = byteBuffer.getInt();
+            nodeOffsets[i] = new int[levelSize];
+            for (int j = 0; j < levelSize; j++) {
+                this.nodeOffsets[i][j] = byteBuffer.getInt();
+            }
         }
 
         System.out.println("min = " + min);
         System.out.println("max = " + max);
 
-        System.out.println("nodeOffsets = " + Arrays.toString(nodeOffsets));
+        for (int i = 0; i < levels; i++) {
+            System.out.println("Level = " + Arrays.toString(nodeOffsets[i]));
+        }
     }
 
     /**
@@ -85,28 +89,31 @@ public class BTree<K, V> {
     public ByteBuffer getNode(final int level, final int parentIndex, final int index) throws IOException {
         int startOffset;
         int blockSize;
-        if (level == 0) {
-            assert parentIndex == 0;
-            startOffset = BTreeBuilder.BLOCK_SIZE * index;
-            blockSize = nodeOffsets[1] - nodeOffsets[0];
-        }
-        else {
-            int blockOffset = 0;
-            for (int i = 0; i < level; i++) {
-                blockOffset += nodesOnLevel(i);
-            }
 
-            blockOffset += fanout * parentIndex + index;
-            System.out.println("blockOffset = " + blockOffset);
-            System.out.println("nodesOnLevel(level) = " + (nodesOnLevel(level) - 1));
-            System.out.println("in = " + index);
-
-            System.out.println("(index < (nodesOnLevel(level) - 1)) = " + (index < (nodesOnLevel(level) - 1)));
-            assert index < nodesOnLevel(level) : "Out of index";
-            startOffset = blockOffset * BTreeBuilder.BLOCK_SIZE;
-            blockSize = nodeOffsets[blockOffset + 1] - nodeOffsets[blockOffset]; // ??? last node won't work, we have to store the last node "end" block offset as well
-            System.out.println("blockSize = " + blockSize);
+        int blockOffset = 0;
+        for (int i = 0; i < level; i++) {
+            blockOffset += nodesOnLevel(i);
         }
+
+        blockOffset += fanout * parentIndex + index;
+
+        int nodesOnCurrentLevel = nodesOnLevel(level);
+        if (index > (nodesOnCurrentLevel - 1)) {
+            throw new IndexOutOfBoundsException(String.format("Max nodes on %d level: %d, index: %d", nodesOnCurrentLevel, level, index));
+        }
+
+        startOffset = blockOffset * BTreeBuilder.BLOCK_SIZE;
+        int[] levelOffsets = nodeOffsets[level];
+
+        if (index == levelOffsets.length - 1) { // is't the last one in block
+            blockSize = nodeOffsets[level + 1][0] - levelOffsets[index];
+        } else if (level < levels - 1) {
+            blockSize = levelOffsets[index + 1] - levelOffsets[index];
+        } else {
+            // ??? very last node won't work, we have to store the last node "end" block offset as well, we should do one more `else` block
+            throw new NotImplementedException();
+        }
+
 
         ByteBuffer buf = ByteBuffer.allocate(blockSize * BTreeBuilder.BLOCK_SIZE);
         in.seek(startOffset);
